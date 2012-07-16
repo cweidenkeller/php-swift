@@ -305,13 +305,18 @@ class http_request
         {
             $url .= '?';
             $count = 1;
-            foreach ($this->query as $key => $value)
+            if (is_array($this->query) && count($this->query) > 0)
             {
-                $url .= rawurlencode($key) . "=" . rawurlencode($value) ;
-                if ($count != count($this->query)) 
-                    $url .= '&';
-                $count ++;
-            } 
+                foreach ($this->query as $key => $value)
+                {
+                    $url .= rawurlencode($key) . "=" . rawurlencode($value) ;
+                    if ($count != count($this->query))
+                    {
+                        $url .= '&';
+                    }
+                    $count ++;
+                } 
+            }
         }
         $request_line = $this->method . ' ' . $url . ' ' .
         $this->VERSION . "\r\n";
@@ -367,26 +372,35 @@ class http_request
     function start_request($method, $url, $body = null)
     {
         $this->requests += 1;
-        if (($this->requests % 100) == 0)
-            {
+        $metadata = stream_get_meta_data($this->fp);
+        if (($this->requests % 100) === 0 || $metadata['timed_out'] === true)
+        {
                 $this->requests = 0;
                 $this->connection();
-            }
+        }
         $this->method = strtoupper($method);
         $this->url = $url;
         if (!array_key_exists('content-length', $this->headers) and
             !array_key_exists('transfer-encoding', $this->headers) and $body)
+        {
             $this->add_header('content-length', strlen($body));
+        }
         elseif (!array_key_exists('content-length', $this->headers) and
                !array_key_exists('transfer-encoding', $this->headers)
                and !$body) 
+        {
             $this->add_header('content-length', '0');
+        }
         if (array_key_exists('content-length', $this->headers))
+        {
             $this->cl_not_sent = $this->headers['content-length'];
+        }
         $message = $this->build_request_line() . $this->build_headers();
         fwrite($this->fp, $message);
-        if ($body) 
+        if ($body)
+        {
             $this->send($body);
+        }
     }
     /**
      * @access private
@@ -395,19 +409,21 @@ class http_request
     {
         if (array_key_exists('transfer-encoding', $this->headers))
         {
-            if ($data)
+            if ($data !== null)
             {
                 $len = dechex(strlen($data));
                 fwrite($this->fp, $len . "\n" . $data. "\r\n");
             }
         }
-        elseif ($data)
+        elseif ($data !== null)
         {
             if (strlen($data) > $this->cl_not_sent)
+            {
                 throw new ExceedsContentLength(
                                 "Length of Data too long!\nAmt sent: " .
                                 strlen($data) . "\nAmt left to send: " .
                                 $this->cl_not_sent);
+            }
             $this->cl_not_sent -= strlen($data);
             fwrite($this->fp, $data);
         }
@@ -419,52 +435,12 @@ class http_request
     {
         if (array_key_exists('transfer-encoding', $this->headers))
             fwrite($this->fp, "0\r\n\n");
+        $this->query = array();
         $this->headers = array();
         $this->cl_not_sent = 0;
         $this->method = '';
         $this->url = '';
         return new http_response($this->fp, $this->timeout);
-    }
-}
-/**
- * @access private
- */
-class object_iter implements Iterator
-{
-    private $body = '';
-    private $valid = true;
-    private $n = 0;
-    private $resp_chunk_size = 0;
-    public function __construct($resp, $resp_chunk_size)
-    {
-        $this->resp = $resp;
-        $this->resp_chunk_size = $resp_chunk_size;
-        $this->body = $resp->read($this->resp_chunk_size);
-        if (!$this->body)
-        {
-            $this->valid = false;
-        }
-    }
-    function rewind(){ }
-    function key()
-    {
-        return ++$this->n;
-    }
-    function next()
-    {
-        $this->body = $this->resp->read($this->resp_chunk_size);
-        if (!$this->body)
-        {
-            $this->valid = null;
-        }
-    }
-    function current()
-    {
-        return $this->body;
-    }
-    function valid()
-    {
-        return $this->valid;
     }
 }
 /**
@@ -482,658 +458,698 @@ function prep_url($url)
         $arr['path'] = parse_url($url, PHP_URL_PATH);
     return $arr;
 }
-/**
- * Get a Valid Auth Token and Storage URL from Swift
- * @param string $url The Auth URL accepts proto and :port
- * @param string $user The Swift Username
- * @param string $key The Users API Key
- * @param array $args Optional Configuration Options
- * @param string $args['snet'] Set if you are connecting over snet
- * @param int $args['timeout'] Set for Socket Timeout
- * @return array keys:'headers', 'status', 'reason'
- * @exception ClientException
- */
-function get_auth($url, $user, $key, $args = array())
+class HTTPResponseFactory
 {
-    if (array_key_exists('snet', $args)) 
-        $snet = $args['snet'];
-    else 
-        $snet = null;
-    if (array_key_exists('timeout', $args)) 
-        $timeout = $args['timeout'];
-    else 
-        $timeout = 10;
-    $url = prep_url($url);
-    if (array_key_exists('http_conn', $args)) 
-        $req = $args['http_conn'];
-    else 
-        $req = new http_request($url['host'], $timeout);
-    $req->add_headers(array('x-auth-user' => $user, 'x-auth-key' => $key));
-    $req->start_request('GET', $url['path']);
-    $resp = $req->get_response();
-    $resp->read();
-    if ($resp->get_status() < 200 or $resp->get_status() > 299)
+    private $connections = array();
+    private $last_used = array();
+    private $timeout = 60;
+    function __construct($timeout=60)
     {
-        throw new ClientException("ERROR Unable to GET Auth - " .
-                                  $resp->get_status(). ":" .
-                                  $resp->get_reason());
+        $this->timeout = $timeout;
     }
-    $headers = $resp->get_headers();
-    if ($snet)
+    public function get_http_response($url, $method, $headers=array(), $query=array(), $body=null, $chunk_size=10240)
     {
-        $headers['x-storage-url'] = explode('://', $headers['x-storage-url']);
-        $headers['x-storage-url'][1] = 'snet-' . $headers['x-storage-url'][1];
-        $headers['x-storage-url'] = implode('://', $headers['x-storage-url']);
-    }
-    return array('headers' => $headers,
-                 'status' => $resp->get_status(),
-                 'reason' => $resp->get_reason());
-}
-/**
- * Get a container listing and account stats from Swift Acct
- * @param string $url The Storage URL accepts proto and :port
- * @param string $token a Valid Auth Token
- * @param array $args Optional Configuration Options
- * @param int $args['limit'] Limit the number of results to limit.
- * @param string $args['prefix'] Only return results with starting with prefix.
- * @param string $args['marker'] Start listing from marker
- * @param int $args['timeout'] Set for Socket Timeout
- * @param http_request $args['http_conn'] Pass an http_request Object
- * to reuse the same connection.
- * @param bool $args['full_listing'] Set to True for full listing of account.
- * @return array keys:'containers', 'headers', 'status', 'reason'
- * @exception ClientException
- */
-function get_account($url, $token, $args = array())
-{
-    $url = prep_url($url);
-    if (array_key_exists('timeout', $args)) 
-        $timeout = $args['timeout'];
-    else 
-        $timeout = 10;
-    if (array_key_exists('http_conn', $args)) 
-        $req = $args['http_conn'];
-    else 
-        $req = new http_request($url['host'], $timeout);
-    $req->add_header('X-Auth-Token', $token);
-    if (array_key_exists('marker', $args)) 
-        $req->add_query_string('marker', $args['marker']);
-    if (array_key_exists('limit', $args)) 
-        $req->add_query_string('limit', $args['limit']);
-    if (array_key_exists('prefix', $args)) 
-        $req->add_query_string('prefix', $args['prefix']);
-    $req->add_query_string('format', 'json');
-    $req->start_request('GET', $url['path']);
-    $resp = $req->get_response();
-    $buff = $resp->read();
-    if ($resp->get_status() < 200 or $resp->get_status() > 299)
-    {
-        throw new ClientException("ERROR Unable to GET Account - " .
-                                  $resp->get_status(). ":" .
-                                  $resp->get_reason());
-    }
-    $res['containers'] = json_decode($buff, true);
-    $res['headers'] = $resp->get_headers();
-    $res['status'] = $resp->get_status();
-    $res['reason'] = $resp->get_reason();
-    if (array_key_exists('full_listing', $args))
-    {
-        $args['http_conn'] = $req;
-        unset($args['full_listing']);
-        $switch = false;
-        while (count($buff['containers']))
+        $method = strtoupper($method);
+        $prepped_url = prep_url($url);
+        $host = $prepped_url['host'];
+        $path = $prepped_url['path'];
+        if (!array_key_exists($host, $this->connections))
         {
-            $args['marker'] =
-            $res['containers'][count($res['containers']) -1]['name'];
-            while (true)
-            {
-                try
-                {
-                    $buff = get_account($url['host'] . $url['path'],
-                                        $token, $args);
-                    break;
-                }
-                catch (ClientException $e) 
-               {
-                   if ($switch)
-                    {
-                        throw new ClientException("ERROR " .
-                                                  "Unable to GET Full " .
-                                                  "Account Listing - " .
-                                                  "Please Try Again!" .
-                                                  $container. ":" .
-                                                  print_r($args));
-                    }
-                    $switch = true; 
-               }
-            }
-            if ($buff['containers']) 
-                $res['containers'] =
-                array_merge($res['containers'], $buff['containers']);
+            $this->connections[$host] = new http_request($host, $this->timeout);
+            $this->last_used[$host] = time();
         }
-    }
-    return $res;
-}
-/**
- * HEAD a Swift account to get Acct info.
- * @param string $url The Storage URL accepts proto and :port
- * @param string $token a Valid Auth Token
- * @param array $args Optional Configuration Options
- * @param int $args['timeout'] Set for Socket Timeout
- * @param http_request $args['http_conn'] Pass an http_request Object
- * to reuse the same connection.
- * @return array keys:'headers', 'status', 'reason'
- * @exception ClientException
- */
-function head_account($url, $token, $args = array())
-{
-    if (array_key_exists('timeout', $args)) 
-        $timeout = $args['timeout'];
-    else 
-        $timeout = 10;
-    $url = prep_url($url);
-    if (array_key_exists('http_conn', $args)) 
-        $req = $args['http_conn'];
-    else 
-        $req = new http_request($url['host'], $timeout);
-    $req->add_header('X-Auth-Token', $token);
-    $req->start_request('HEAD', $url['path']);
-    $resp = $req->get_response();
-    $resp->read();
-    if ($resp->get_status() < 200 or $resp->get_status() > 299)
-    {
-        throw new ClientException("ERROR Unable to HEAD Account - " .
-                                  $resp->get_status(). ":" .
-                                  $resp->get_reason());
-    }
-    return array('headers' => $resp->get_headers(),
-                 'status' => $resp->get_status(),
-                 'reason' => $resp->get_reason());
-}
-/**
- * POST a Swift account to update account Headers.
- * @param string $url The Storage URL accepts proto and :port
- * @param string $token a Valid Auth Token
- * @param array $headers An Assoc Array with X-Meta Headers
- * @param array $args Optional Configuration Options
- * @param int $args['timeout'] Set for Socket Timeout
- * @param http_request $args['http_conn'] Pass an http_request Object
- * to reuse the same connection.
- * @exception ClientException
- */
-function post_account($url, $token, $headers, $args = array())
-{
-    if (array_key_exists('timeout', $args)) 
-        $timeout = $args['timeout'];
-    else 
-        $timeout = 10;
-    $url = prep_url($url);
-    if (array_key_exists('http_conn', $args)) 
-        $req = $args['http_conn'];
-    else 
-        $req = new http_request($url['host'], $timeout);
-    $req->add_header('X-Auth-Token', $token);
-    $req->add_headers($headers);
-    $req->start_request('POST', $url['path']);
-    $resp = $req->get_response();
-    $resp->read();
-    if ($resp->get_status() < 200 or $resp->get_status() > 299)
-    {
-        throw new ClientException("ERROR Unable to POST Account - " .
-                                  $resp->get_status(). ":" .
-                                  $resp->get_reason());
-    }
-}
-/**
- * GET an object listing and container stats from Swift Container
- * @param string $url The Storage URL accepts proto and :port
- * @param string $token a Valid Auth Token
- * @param string $container container name
- * @param array $args Optional Configuration Options
- * @param int $args['limit'] Limit the number of results to limit.
- * @param string $args['prefix'] Only return results with starting with prefix.
- * @param string $args['marker'] Start listing from marker
- * @param string $args['delimiter'] For Object Delimiter support.
- * @param int $args['timeout'] Set for Socket Timeout
- * @param http_request $args['http_conn'] Pass an http_request Object
- * to reuse the same connection.
- * @param bool $args['full_listing'] Set to True for full listing of container.
- * @return array keys: 'objects', 'headers', 'status', 'reason'
- * @exception ClientException
- */
-function get_container($url, $token, $container, $args = array())
-{
-    if (array_key_exists('timeout', $args)) 
-        $timeout = $args['timeout'];
-    else 
-        $timeout = 10;
-    $url = prep_url($url);
-    if (array_key_exists('http_conn', $args)) 
-        $req = $args['http_conn'];
-    else 
-        $req = new http_request($url['host'], $timeout);
-    $req->add_header('X-Auth-Token', $token);
-    if (array_key_exists('marker', $args)) 
-        $req->add_query_string('marker', $args['marker']);
-    if (array_key_exists('limit', $args)) 
-        $req->add_query_string('limit', $args['limit']);
-    if (array_key_exists('prefix', $args)) 
-        $req->add_query_string('prefix', $args['prefix']);
-    if (array_key_exists('delimiter', $args)) 
-        $req->add_query_string('delimiter', $args['delimiter']);
-    $req->add_query_string('format', 'json');
-    $req->start_request('GET', $url['path'] . '/' . $container);
-    $resp = $req->get_response();
-    $buff = $resp->read();
-    if ($resp->get_status() <  200 or $resp->get_status() > 299)
-    {
-        throw new ClientException("ERROR Unable to GET Container - " .
-                                  $resp->get_status(). ":" .
-                                  $resp->get_reason());
-    }
-    $res['objects'] = json_decode($buff, true);
-    $res['headers'] = $resp->get_headers();
-    $res['reason'] = $resp->get_reason();
-    $res['status'] = $resp->get_status();
-    if (array_key_exists('full_listing', $args))
-    {
-        $args['http_conn'] = $req;
-        unset($args['full_listing']);
-        while (count($buff['objects']))
+        if (time() - $this->last_used[$host] >= $this->timeout)
         {
-            $args['marker'] =
-            (array_key_exists('name',
-                              $res['objects']
-                              [count($res['objects']) -1])) ?
-            $res['objects'][count($res['objects']) -1]['name'] :
-            $res['objects'][count($res['objects']) -1]['subdir'];
-            $switch = false;
-            while (true)
+            $this->connections[$host] = new http_request($host, $this->timeout);
+            $this->last_used[$host] = time();
+        }
+        $req =  $this->connections[$host];
+        if ($headers !== null && is_array($headers))
+        {
+            $req->add_headers($headers);
+        }
+        if ($query !== null && is_array($query))
+        {
+            $req->add_query_strings($query);
+        }
+        if ($body !== null)
+        {
+            if (!array_key_exists('content-length', array_change_key_case($headers)))
             {
-                try
+                $req->add_header('Transfer-Encoding', 'chunked');
+            }
+        }
+        $req->start_request($method, $path);
+        if ($body !== null)
+        {
+            if (is_resource($contents))
+            {
+                while (!feof($contents))
                 {
-                    $buff = get_container($url['host'] . $url['path'],
-                                          $token, $container, $args);
-                    $switch = false;
-                    break;
-                }
-                catch (ClientException $e)
-                {
-                    if ($switch)
-                    {
-                        throw new ClientException("ERROR " .
-                                                  "Unable to GET Full " .
-                                                  "Object Listing - " .
-                                                  "Please Try Again!" .
-                                                  $container. ":" .
-                                                  print_r($args));
-                    }
-                    $switch = true;
+                    $req->send(fread($contents, $chunk_size));
                 }
             }
-            if( $buff['objects']) 
-                $res['objects'] =
-                array_merge($res['objects'], $buff['objects']);
+            else
+            {
+                $req->send($contents);
+            }
         }
-    }
-    return $res;
-}
-/**
- * HEAD a Swift Container to get Container info.
- * @param string $url The Storage URL accepts proto and :port.
- * @param string $token a Valid Auth Token.
- * @param string $container Container name.
- * @param array $args Optional Configuration Options.
- * @param int $args['timeout'] Set for Socket Timeout.
- * @param http_request $args['http_conn'] Pass an http_request Object.
- * to reuse the same connection.
- * @return array keys:'headers', 'status', 'reason'.
- * @exception ClientException
- */
-function head_container($url, $token, $container, $args = array())
-{
-    if (array_key_exists('timeout', $args)) 
-        $timeout = $args['timeout'];
-    else 
-        $timeout = 10;
-    $url = prep_url($url);
-    if (array_key_exists('http_conn', $args)) 
-        $req = $args['http_conn'];
-    else 
-        $req = new http_request($url['host']);
-    $req->add_header('X-Auth-Token', $token);
-    $req->start_request('HEAD', $url['path'] . '/' . $container);
-    $resp = $req->get_response();
-    $buff = $resp->read();
-    if ($resp->get_status() < 200 or $resp->get_status() > 299)
-    {
-        throw new ClientException("ERROR Unable to HEAD Container - " .
-                                  $resp->get_status(). ":" .
-                                  $resp->get_reason());
-    }
-    return array('headers' => $resp->get_headers(),
-                 'status' => $resp->get_status(),
-                 'reason' => $resp->get_reason());
-}
-/**
- * POST a Swift container to update container Headers.
- * @param string $url The Storage URL accepts proto and :port.
- * @param string $token a Valid Auth Token.
- * @param string $container Container name.
- * @param array $headers An Assoc Array with X-Meta Headers.
- * @param array $args Optional Configuration Options.
- * @param int $args['timeout'] Set for Socket Timeout.
- * @param http_request $args['http_conn'] Pass an http_request Object.
- * to reuse the same connection.
- * @exception ClientException.
- */
-function post_container($url, $token, $container, $headers, $args = array())
-{
-    if (array_key_exists('timeout', $args)) 
-        $timeout = $args['timeout'];
-    else 
-        $timeout = 10;
-    $url = prep_url($url);
-    if (array_key_exists('http_conn', $args)) 
-        $req = $args['http_conn'];
-    else 
-        $req = new http_request($url['host']);
-    $req->add_header('X-Auth-Token', $token);
-    $req->add_headers($headers);
-    $req->start_request('POST', $url['path'] . '/' . $container);
-    $resp = $req->get_response();
-    $buff = $resp->read();
-    if ($resp->get_status() < 200 or $resp->get_status() > 299)
-    {
-        throw new ClientException("ERROR Unable to POST Container - " .
-                                  $resp->get_status(). ":" .
-                                  $resp->get_reason());
+        $resp = $req->get_response();
+        if (in_array($method, array('PUT','DELETE','POST','HEAD')))
+        {
+            $resp->read();
+        }
+        return $resp;
     }
 }
-/**
- * PUT to a container to create it.
- * @param string $url The Storage URL accepts proto and :port.
- * @param string $token a Valid Auth Token.
- * @param string $container Container name.
- * @param array $args Optional Configuration Options.
- * @param array $args['headers'] Array for X-Meta Headers.
- * @param int $args['timeout'] Set for Socket Timeout.
- * @param http_request $args['http_conn'] Pass an http_request Object.
- * to reuse the same connection.
- * @exception ClientException.
- */
-function put_container($url, $token, $container, $args = array())
+class Client
 {
-    if (array_key_exists('timeout', $args)) 
-        $timeout = $args['timeout'];
-    else 
-        $timeout = 10;
-    $url = prep_url($url);
-    if (array_key_exists('http_conn', $args)) 
-        $req = $args['http_conn'];
-    else 
-        $req = new http_request($url['host'], $timeout);
-    $req->add_header('X-Auth-Token', $token);
-    if (array_key_exists('headers', $args)) 
-        $req->add_headers($args['headers']);
-    $req->start_request('PUT', $url['path'] . '/' . $container);
-    $resp = $req->get_response();
-    $buff = $resp->read();
-    if ($resp->get_status() < 200 or $resp->get_status() > 299)
+    public $retries = 0;
+    public $chunk_size = 10240;
+    private $_retries_attempted = 0;
+    private $http_factory = null;
+    /**
+     * Need to add comments
+     */
+    public function __construct($timeout=60, $http_factory=null)
     {
-        throw new ClientException("ERROR Unable to PUT Container - " .
-                                  $resp->get_status(). ":" .
-                                  $resp->get_reason());
+        $this->http_factory = ($http_factory === null) ? new HTTPResponseFactory($timeout) : $http_factory;
     }
-}
-/**
- * DELETE an empty container.
- * @param string $url The Storage URL accepts proto and :port.
- * @param string $token a Valid Auth Token.
- * @param string $container Container name.
- * @param array $args Optional Configuration Options.
- * @param int $args['timeout'] Set for Socket Timeout.
- * @param http_request $args['http_conn'] Pass an http_request Object.
- * to reuse the same connection.
- * @exception ClientException.
- */
-function delete_container($url, $token, $container, $args = array())
-{
-    if (array_key_exists('timeout', $args)) 
-        $timeout = $args['timeout'];
-    else 
-        $timeout = 10;
-    $url = prep_url($url);
-    if (array_key_exists('http_conn', $args)) 
-        $req = $args['http_conn'];
-    else 
-        $req = new http_request($url['host'], $timeout);
-    $req->add_header('X-Auth-Token', $token);
-    $req->start_request('DELETE', $url['path'] . '/' . $container);
-    $resp = $req->get_response();
-    $buff = $resp->read();
-    if ($resp->get_status() < 200 or $resp->get_status() > 299)
+    /**
+     * Get a Valid Auth Token and Storage URL for Swift
+     * @param string $url The Auth URL accepts proto and :port
+     * @param string $user The Swift Username
+     * @param string $key The Users API Key
+     * @param bool $snet Connecting over snet? defaults to false
+     * @return auth_response An auth_response object.
+     * @exception ClientException
+     */
+    public function get_auth($url, $user, $key, $snet=false)
     {
-        throw new ClientException("ERROR Unable to DELETE Container - " .
-                                  $resp->get_status(). ":" .
-                                  $resp->get_reason());
-    }
-}
-/**
- * GET an object data and object stats from Swift object
- * @param string $url The Storage URL accepts proto and :port
- * @param string $token a Valid Auth Token
- * @param string $container container name
- * @param string $name The objects name.
- * @param array $args Optional Configuration Options
- * @param int $args['timeout'] Set for Socket Timeout
- * @param http_request $args['http_conn'] Pass an http_request Object
- * to reuse the same connection.
- * @param int $args['resp_chunk_size'] If passed return iterable object
- * data rather then the entire object
- * @return array keys: 'data', 'headers', 'status', 'reason'
- * @exception ClientException
- */
-function get_object($url, $token, $container, $name, $args = array())
-{
-    if (array_key_exists('timeout', $args)) 
-        $timeout = $args['timeout'];
-    else 
-        $timeout = 10;
-    $url = prep_url($url);
-    if (array_key_exists('http_conn', $args)) 
-        $req = $args['http_conn'];
-    else 
-        $req = new http_request($url['host'], $timeout);
-    $req->add_header('X-Auth-Token', $token);
-    $req->start_request('GET', $url['path'] . '/' . $container . '/' . $name);
-    $resp = $req->get_response();
-    if ($resp->get_status() < 200 or $resp->get_status() > 299)
-    {
+        $resp = $this->http_factory->get_http_response($url, 'GET', array('X-Auth-User' => $user, 'X-Auth-Key' => $key));
         $resp->read();
-        throw new ClientException("ERROR Unable to GET Object - " .
-                                  $resp->get_status(). ":" .
-                                  $resp->get_reason());
+        if ($resp->get_status() < 200 or $resp->get_status() > 299)
+        {
+            if ($this->_retries_attempted < $this->retries)
+            {
+                $this->_retries_attempted++;
+                return $this->get_auth($url, $user, $key, $snet);
+            }
+            $this->_retries_attempted = 0;
+            throw new ClientException("ERROR Unable to GET Auth - " .
+                                      $resp->get_status(). ":" .
+                                      $resp->get_reason());
+        }
+        $headers = $resp->get_headers();
+        if ($snet === true)
+        {
+            $headers['x-storage-url'] = explode('://', $headers['x-storage-url']);
+            $headers['x-storage-url'][1] = 'snet-' . $headers['x-storage-url'][1];
+            $headers['x-storage-url'] = implode('://', $headers['x-storage-url']);
+        }
+        $this->_retries_attempted = 0;
+        return new AuthResponse($headers, $resp->get_status(), $resp->get_reason());
     }
-    if (!array_key_exists('resp_chunk_size', $args))
-         return array('headers' => $resp->get_headers(),
-                      'data' => $resp->read(),
-                      'status' => $resp->get_status(),
-                      'reason' => $resp->get_reason());
-    return array('headers' => $resp->get_headers(),
-                 'data' => new object_iter($resp, $args['resp_chunk_size']),
-                 'status' => $resp->get_status(),
-                 'reason' => $resp->get_reason());
-}
-/**
- * HEAD a Swift Object to get Object info.
- * @param string $url The Storage URL accepts proto and :port.
- * @param string $token a Valid Auth Token.
- * @param string $container Container name.
- * @param string $name The objects name.
- * @param array $args Optional Configuration Options.
- * @param int $args['timeout'] Set for Socket Timeout.
- * @param http_request $args['http_conn'] Pass an http_request Object.
- * to reuse the same connection.
- * @return array keys:'headers', 'status', 'reason'.
- * @exception ClientException
- */
-function head_object($url, $token, $container, $name, $args = array())
-{
-    if( array_key_exists('timeout', $args)) 
-        $timeout = $args['timeout'];
-    else 
-        $timeout = 10;
-    $url = prep_url($url);
-    if (array_key_exists('http_conn', $args)) 
-        $req = $args['http_conn'];
-    else 
-        $req = new http_request($url['host'], $timeout);
-    $req->add_header('X-Auth-Token', $token);
-    $req->start_request('HEAD', $url['path'] . '/' . $container . '/' . $name);
-    $resp = $req->get_response();
-    if ($resp->get_status() < 200 or $resp->get_status() > 299)
+    /**
+    * Get a container listing and account stats from Swift Acct
+    * @param string $url The Storage URL accepts proto and :port
+    * @param string $token a Valid Auth Token
+    * @param array $args Optional Configuration.
+    * @param array $args['headers'] Add headers to this request.
+    * @param array $args['query'] Add optional query string key value pairs.
+    * @param bool $args['full_listing'] Set to True for full listing of account.
+    * @return AccountResponse
+    * @exception ClientException
+    */
+    public function get_account($url, $token, $args=array())
     {
-        throw new ClientException("ERROR Unable to HEAD Object - " .
-                                  $resp->get_status(). ":" .
-                                  $resp->get_reason());
+        $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
+        $query = array_key_exists('query', $args) ? array_merge($args['query'], array('format' => 'json')) : array('format' => 'json');
+        $resp = $this->http_factory->get_http_response($url, 'GET', $headers, $query);
+        $headers = $resp->get_headers();
+        $status = $resp->get_status();
+        $reason = $resp->get_reason();
+        $containers = $resp->read();
+        if ($resp->get_status() < 200 or $resp->get_status() > 299)
+        {
+            if ($this->_retries_attempted < $this->retries)
+            {
+                $this->_retries_attempted++;
+                return $this->get_account($url, $token, $args);
+            }
+            $this->_retries_attempted = 0;
+            throw new ClientException("ERROR Unable to GET Account - " .
+                                      $resp->get_status() . ":" .
+                                      $resp->get_reason());
+        }
+        $containers = json_decode($containers, true);
+        if (array_key_exists('full_listing', $args) && $args['full_listing'] === true)
+        {
+            unset($args['full_listing']);
+            if (!array_key_exists('query', $args))
+            {
+                $args['query'] = array();
+            }
+            while (true)
+            {
+                $args['query']['marker'] = $containers[count($containers) -1]['name'];
+                $resp = $this->get_account($url, $token, $args);
+                if (count($resp->GetContainers()) <= 0)
+                {
+                    break;
+                }
+                $containers = array_merge($containers, $resp->GetContainers());
+            }
+        }
+        $this->_retries_attempted = 0;
+        return new AccountResponse($containers, $headers, $status, $reason);
     }
-    return array('headers' => $resp->get_headers(),
-                 'status' => $resp->get_status(),
-                 'reason' => $resp->get_reason());
-}
-/**
- * POST to a Swift object to update object Headers.
- * @param string $url The Storage URL accepts proto and :port.
- * @param string $token a Valid Auth Token.
- * @param string $container Container name.
- * @param string $name The Object name.
- * @param array $headers An Assoc Array with X-Meta Headers.
- * @param array $args Optional Configuration Options.
- * @param int $args['timeout'] Set for Socket Timeout.
- * @param http_request $args['http_conn'] Pass an http_request Object.
- * to reuse the same connection.
- * @exception ClientException.
- */
-function post_object($url, $token, $container, $name, $headers, $args = array())
-{
-    if (array_key_exists('timeout', $args)) 
-        $timeout = $args['timeout'];
-    else 
-        $timeout = 10;
-    $url = prep_url($url);
-    if (array_key_exists('http_conn', $args)) 
-        $req = $args['http_conn'];
-    else 
-        $req = new http_request($url['host'],  $timeout);
-    $req->add_header('X-Auth-Token', $token);
-    $req->add_headers($headers);
-    $req->start_request('POST', $url['path'] . '/' . $container . '/' . $name);
-    $resp = $req->get_response();
-    $buff = $resp->read();
-    if ($resp->get_status() < 200 or $resp->get_status() > 299)
+    /**
+    * HEAD a Swift account to get Acct info.
+    * @param string $url The Storage URL accepts proto and :port
+    * @param string $token a Valid Auth Token
+    * @param array $args Optional Configuration Options
+    * @return array keys:'headers', 'status', 'reason'
+    * @exception ClientException
+    */
+    function head_account($url, $token, $args=array())
     {
-        throw new ClientException("ERROR Unable to POST Object - " .
-                                  $resp->get_status(). ":" .
-                                  $resp->get_reason());
+        $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
+        $query = array_key_exists('query', $args) ? $args['query'] : array();
+        $resp = $this->http_factory->get_http_response($url, 'HEAD', $headers, $query);
+        if ($resp->get_status() < 200 or $resp->get_status() > 299)
+        {
+            if ($this->_retries_attempted < $this->retries)
+            {
+                $this->_retries_attempted++;
+                return $this->head_account($url, $token, $args);
+            }
+            $this->_retries_attempted = 0;
+            throw new ClientException("ERROR Unable to HEAD Account - " .
+                                      $resp->get_status(). ":" .
+                                      $resp->get_reason());
+        }
+        $this->_retries_attempted = 0;
+        return new AccountResponse(array(), $resp->get_headers(), $resp->get_status(), $resp->get_reason());
+    }
+    /**
+    * POST a Swift account to update account Headers.
+    * @param string $url The Storage URL accepts proto and :port
+    * @param string $token a Valid Auth Token
+    * @param array $headers An Assoc Array with X-Meta Headers
+    * @param array $args Optional Configuration Options
+    * @param int $args['timeout'] Set for Socket Timeout
+    * @param http_request $args['http_conn'] Pass an http_request Object
+    * to reuse the same connection.
+    * @exception ClientException
+    */
+    public function post_account($url, $token, $args = array())
+    {
+        $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
+        $query = array_key_exists('query', $args) ? $args['query'] : array();
+        $resp = $this->http_factory->get_http_response($url, 'POST', $headers, $query);
+        if ($resp->get_status() < 200 or $resp->get_status() > 299)
+        {
+            if ($this->_retries_attempted < $this->retries)
+            {
+                $this->_retries_attempted++;
+                $this->post_account($url, $token, $args);
+                return;
+            }
+            $this->_retries_attempted = 0;
+            throw new ClientException("ERROR Unable to POST Account - " .
+                                      $resp->get_status(). ":" .
+                                      $resp->get_reason());
+        }
+        $this->_retries_attempted = 0;
+    }
+   /**
+    * GET an object listing and container stats from Swift Container
+    * @param string $url The Storage URL accepts proto and :port
+    * @param string $token a Valid Auth Token
+    * @param string $container container name
+    * @param array $args Optional Configuration Options
+    * @param int $args['limit'] Limit the number of results to limit.
+    * @param string $args['prefix'] Only return results with starting with prefix.
+    * @param string $args['marker'] Start listing from marker
+    * @param string $args['delimiter'] For Object Delimiter support.
+    * @param int $args['timeout'] Set for Socket Timeout
+    * @param http_request $args['http_conn'] Pass an http_request Object
+    * to reuse the same connection.
+    * @param bool $args['full_listing'] Set to True for full listing of container.
+    * @return array keys: 'objects', 'headers', 'status', 'reason'
+    * @exception ClientException
+    */
+    public function get_container($url, $token, $container, $args = array())
+    {
+        $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
+        $query = array_key_exists('query', $args) ? array_merge($args['query'], array('format' => 'json')) : array('format' => 'json');
+        $resp = $this->http_factory->get_http_response($url . '/' . $container, 'GET', $headers, $query);
+        $headers = $resp->get_headers();
+        $status = $resp->get_status();
+        $reason = $resp->get_reason();
+        $objects = $resp->read();
+        if ($resp->get_status() <  200 or $resp->get_status() > 299)
+        {
+            if ($this->_retries_attempted < $this->retries)
+            {
+                $this->_retries_attempted++;
+                return $this->get_container($url, $token, $container, $args);
+            }
+            $this->_retries_attempted = 0;
+            throw new ClientException("ERROR Unable to GET Container - " .
+                                      $resp->get_status(). ":" .
+                                      $resp->get_reason());
+        }
+        $objects = json_decode($objects, true);
+        if (array_key_exists('full_listing', $args) && $args['full_listing'] === true)
+        {
+            unset($args['full_listing']);
+            while (true)
+            {
+                $args['query']['marker'] =
+                    array_key_exists('name' ,$objects[count($objects) -1]) ?
+                        $objects[count($objects) -1]['name'] :
+                        $objects[count($objects) -1]['subdir'];
+                $resp = $this->get_container($url, $token, $container, $args);
+                if(count($resp->GetObjects()) <= 0)
+                {
+                    break;
+                }
+                $objects = array_merge($objects, $resp->GetObjects());
+            }
+        }
+        $this->_retries_attempted = 0;
+        return new ContainerResponse($objects, $headers, $status, $reason);
+    }
+    /**
+    * HEAD a Swift Container to get Container info.
+    * @param string $url The Storage URL accepts proto and :port.
+    * @param string $token a Valid Auth Token.
+    * @param string $container Container name.
+    * @param array $args Optional Configuration Options.
+    * @exception ClientException
+    */
+    function head_container($url, $token, $container, $args = array())
+    {   
+        $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
+        $query = array_key_exists('query', $args) ? $args['query'] : array();
+        $resp = $this->http_factory->get_http_response($url . '/' . $container, 'HEAD', $headers, $query);
+        if ($resp->get_status() < 200 or $resp->get_status() > 299)
+        {
+            if ($this->_retries_attempted < $this->retries)
+            {
+                $this->_retries_attempted++;
+                return $this->head_container($url, $token, $container, $args);
+            }
+            $this->_retries_attempted = 0;
+            throw new ClientException("ERROR Unable to HEAD Container - " .
+                                      $resp->get_status(). ":" .
+                                      $resp->get_reason());
+        }
+        $this->_retries_attempted = 0;
+        return new ContainerResponse(array(), $resp->get_headers(), $resp->get_status(), $resp->get_reason());
+    }
+    /**
+    * POST a Swift container to update container Headers.
+    * @param string $url The Storage URL accepts proto and :port.
+    * @param string $token a Valid Auth Token.
+    * @param string $container Container name.
+    * @param array $headers An Assoc Array with X-Meta Headers.
+    * @param array $args Optional Configuration Options.
+    * @param int $args['timeout'] Set for Socket Timeout.
+    * @param http_request $args['http_conn'] Pass an http_request Object.
+    * to reuse the same connection.
+    * @exception ClientException.
+    */
+    public function post_container($url, $token, $container, $args = array())
+    {
+        $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
+        $query = array_key_exists('query', $args) ? $args['query'] : array();
+        $resp = $this->http_factory->get_http_response($url . '/' . $container, 'POST', $headers, $query);
+        if ($resp->get_status() < 200 or $resp->get_status() > 299)
+        {
+            if ($this->_retries_attempted < $this->retries)
+            {
+                $this->_retries_attempted++;
+                $this->post_container($url, $token, $container, $args);
+                return;
+            }
+            $this->_retries_attempted = 0;
+            throw new ClientException("ERROR Unable to POST Container - " .
+                                      $resp->get_status(). ":" .
+                                      $resp->get_reason());
+        }
+    }
+    /**
+    * PUT to a container to create it.
+    * @param string $url The Storage URL accepts proto and :port.
+    * @param string $token a Valid Auth Token.
+    * @param string $container Container name.
+    * @param array $args Optional Configuration Options.
+    * @param array $args['headers'] Array for X-Meta Headers.
+    * @param int $args['timeout'] Set for Socket Timeout.
+    * @param http_request $args['http_conn'] Pass an http_request Object.
+    * to reuse the same connection.
+    * @exception ClientException.
+    */
+    public function put_container($url, $token, $container, $args = array())
+    {
+        $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
+        $query = array_key_exists('query', $args) ? $args['query'] : array();
+        $resp = $this->http_factory->get_http_response($url . '/' . $container, 'PUT', $headers, $query);
+        if ($resp->get_status() < 200 or $resp->get_status() > 299)
+        {
+            if ($this->_retries_attempted < $this->retries)
+            {
+                $this->_retries_attempted++;
+                $this->put_container($url, $token, $container, $args);
+                return;
+            }
+            $this->_retries_attempted = 0;
+            throw new ClientException("ERROR Unable to PUT Container - " .
+                                      $resp->get_status(). ":" .
+                                      $resp->get_reason());
+        }
+    }
+    /**
+    * DELETE an empty container.
+    * @param string $url The Storage URL accepts proto and :port.
+    * @param string $token a Valid Auth Token.
+    * @param string $container Container name.
+    * @param array $args Optional Configuration Options.
+    * @param int $args['timeout'] Set for Socket Timeout.
+    * @param http_request $args['http_conn'] Pass an http_request Object.
+    * to reuse the same connection.
+    * @exception ClientException.
+    */
+    public function delete_container($url, $token, $container, $args = array())
+    {
+        $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
+        $query = array_key_exists('query', $args) ? $args['query'] : array();
+        $resp = $this->http_factory->get_http_response($url . '/' . $container, 'DELETE', $headers, $query);
+        if ($resp->get_status() < 200 or $resp->get_status() > 299)
+        {
+            if ($this->_retries_attempted < $this->retries)
+            {
+                $this->_retries_attempted++;
+                $this->delete_container($url, $token, $container, $args);
+                return;
+            }
+            $this->_retries_attempted = 0;
+            throw new ClientException("ERROR Unable to DELETE Container - " .
+                                      $resp->get_status(). ":" .
+                                      $resp->get_reason());
+        }
+    }
+    /**
+    * GET an object data and object stats from Swift object
+    * @param string $url The Storage URL accepts proto and :port
+    * @param string $token a Valid Auth Token
+    * @param string $container container name
+    * @param string $name The objects name.
+    * @param array $args Optional Configuration Options
+    * @param int $args['timeout'] Set for Socket Timeout
+    * @param http_request $args['http_conn'] Pass an http_request Object
+    * to reuse the same connection.
+    * @param int $args['resp_chunk_size'] If passed return iterable object
+    * data rather then the entire object
+    * @return array keys: 'data', 'headers', 'status', 'reason'
+    * @exception ClientException
+    */
+    public function get_object($url, $token, $container, $name, $args = array())
+    {
+        $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
+        $query = array_key_exists('query', $args) ? $args['query'] : array();
+        $resp = $this->http_factory->get_http_response($url . '/' . $container . '/' . $name, 'GET', $headers, $query);
+        if ($resp->get_status() < 200 or $resp->get_status() > 299)
+        {
+            if ($this->_retries_attempted < $this->retries)
+            {
+                $this->_retries_attempted++;
+                return $this->get_object($url, $token, $container, $name, $args);
+            }
+            $this->_retries_attempted = 0;
+            $resp->read();
+            throw new ClientException("ERROR Unable to GET Object - " .
+                                      $resp->get_status(). ":" .
+                                      $resp->get_reason());
+        }
+        return new ObjectResponse($resp, $resp->get_headers(), $resp->get_status(), $resp->get_reason());
+    }
+    /**
+    * HEAD a Swift Object to get Object info.
+    * @param string $url The Storage URL accepts proto and :port.
+    * @param string $token a Valid Auth Token.
+    * @param string $container Container name.
+    * @param string $name The objects name.
+    * @param array $args Optional Configuration Options.
+    * @param int $args['timeout'] Set for Socket Timeout.
+    * @param http_request $args['http_conn'] Pass an http_request Object.
+    * to reuse the same connection.
+    * @return array keys:'headers', 'status', 'reason'.
+    * @exception ClientException
+    */
+    public function head_object($url, $token, $container, $name, $args = array())
+    {
+        $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
+        $query = array_key_exists('query', $args) ? $args['query'] : array();
+        $resp = $this->http_factory->get_http_response($url . '/' . $container . '/' . $name, 'HEAD', $headers, $query);
+        if ($resp->get_status() < 200 or $resp->get_status() > 299)
+        {
+            if ($this->_retries_attempted < $this->retries)
+            {
+                $this->_retries_attempted++;
+                return $this->head_object($url, $token, $container, $name, $args);
+            }
+            $this->_retries_attempted = 0;
+            throw new ClientException("ERROR Unable to HEAD Object - " .
+                                      $resp->get_status(). ":" .
+                                      $resp->get_reason());
+        }
+        return new ObjectResponse(null, $resp->get_headers(), $resp->get_status(), $resp->get_reason());
+    }
+   /**
+    * POST to a Swift object to update object Headers.
+    * @param string $url The Storage URL accepts proto and :port.
+    * @param string $token a Valid Auth Token.
+    * @param string $container Container name.
+    * @param string $name The Object name.
+    * @param array $headers An Assoc Array with X-Meta Headers.
+    * @param array $args Optional Configuration Options.
+    * @param int $args['timeout'] Set for Socket Timeout.
+    * @param http_request $args['http_conn'] Pass an http_request Object.
+    * to reuse the same connection.
+    * @exception ClientException.
+    */
+    public function post_object($url, $token, $container, $name, $args = array())
+    {
+        $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
+        $query = array_key_exists('query', $args) ? $args['query'] : array();
+        $resp = $this->http_factory->get_http_response($url . '/' . $container . '/' . $name, 'POST', $headers, $query);
+        if ($resp->get_status() < 200 or $resp->get_status() > 299)
+        {
+            if ($this->_retries_attempted < $this->retries)
+            {
+                $this->_retries_attempted++;
+                $this->post_object($url, $token, $container, $name, $args);
+                return;
+            }
+            throw new ClientException("ERROR Unable to POST Object - " .
+                                       $resp->get_status(). ":" .
+                                       $resp->get_reason());
+        }
+    }
+    /**
+    * PUT to a Swift object to create it.
+    * @param string $url The Storage URL accepts proto and :port.
+    * @param string $token a Valid Auth Token.
+    * @param string $container Container name.
+    * @param string $name The Object name.
+    * @param string/resource $contents Pass as an Open File handle or string as
+    * object content
+    * @param array $args Optional Configuration Options.
+    * @param array $args['headers'] An Assoc Array with X-Meta Headers or Etag,
+    * Content-Type, or Content-Length.
+    * @param int $args['chunk_size'] Pass to specify chunk size
+    * @param int $args['content-length'] Object content length will default to
+    * 65536 bytes if none is set.
+    * @param string $args['etag'] MD5 checksum of object
+    * @param int $args['content-type'] The Objects content type
+    * @param int $args['timeout'] Set for Socket Timeout.
+    * @param http_request $args['http_conn'] Pass an http_request Object.
+    * to reuse the same connection.
+    * @exception ClientException.
+    */
+    public function put_object($url, $token, $container, $name, $contents, $args = array())
+    {
+        $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
+        $query = array_key_exists('query', $args) ? $args['query'] : array();
+        $resp = $this->http_factory->get_http_response($url . '/' . $container . '/' . $name, 'PUT', $headers, $query, $contents);
+        if ($resp->get_status() < 200 or $resp->get_status() > 299)
+        {
+            if ($this->_retries_attempted < $this->retries)
+            {
+                $this->_retries_attempted++;
+                if (is_resource($contents))
+                {
+                    rewind($contents);
+                }
+                $this->put_object($url, $token, $container, $name, $contents, $args);
+                return;
+            }
+            throw new ClientException("ERROR Unable to PUT Object - " .
+                                      $resp->get_status(). ":" .
+                                      $resp->get_reason());
+        }
+    }
+   /**
+    * DELETE an object.
+    * @param string $url The Storage URL accepts proto and :port.
+    * @param string $token a Valid Auth Token.
+    * @param string $container Container name.
+    * @param string $name Object name.
+    * @param array $args Optional Configuration Options.
+    * @param int $args['timeout'] Set for Socket Timeout.
+    * @param http_request $args['http_conn'] Pass an http_request Object.
+    * to reuse the same connection.
+    * @exception ClientException.
+    */
+    public function delete_object($url, $token, $container, $name, $args = array())
+    {
+        $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
+        $query = array_key_exists('query', $args) ? $args['query'] : array();
+        $resp = $this->http_factory->get_http_response($url . '/' . $container . '/' . $name, 'DELETE', $headers, $query);
+        if ($resp->get_status() < 200 or $resp->get_status() > 299)
+        {
+            if ($this->_retries_attempted < $this->retries)
+            {
+                $this->_retries_attempted++;
+                $this->post_object($url, $token, $container, $name, $args);
+                return;
+            }
+            throw new ClientException("ERROR Unable to DELETE Object - " .
+                                      $resp->get_status(). ":" .
+                                      $resp->get_reason());
+        }
     }
 }
-/**
- * PUT to a Swift object to create it.
- * @param string $url The Storage URL accepts proto and :port.
- * @param string $token a Valid Auth Token.
- * @param string $container Container name.
- * @param string $name The Object name.
- * @param string/resource $contents Pass as an Open File handle or string as
- * object content
- * @param array $args Optional Configuration Options.
- * @param array $args['headers'] An Assoc Array with X-Meta Headers or Etag,
- * Content-Type, or Content-Length.
- * @param int $args['chunk_size'] Pass to specify chunk size
- * @param int $args['content-length'] Object content length will default to
- * 65536 bytes if none is set.
- * @param string $args['etag'] MD5 checksum of object
- * @param int $args['content-type'] The Objects content type
- * @param int $args['timeout'] Set for Socket Timeout.
- * @param http_request $args['http_conn'] Pass an http_request Object.
- * to reuse the same connection.
- * @exception ClientException.
- */
-function put_object($url, $token, $container, $name, $contents, $args = array())
+class AuthResponse
 {
-    if (array_key_exists('timeout', $args)) 
-        $timeout = $args['timeout'];
-    else 
-        $timeout = 10;
-    if (!array_key_exists('headers', $args)) 
-        $args['headers'] = array(); 
-    $url = prep_url($url);
-    if (array_key_exists('http_conn', $args)) 
-        $req = $args['http_conn'];
-    else 
-        $req = new http_request($url['host'], $timeout);
-        $req->add_header('X-Auth-Token', $token);
-    if (array_key_exists('headers', $args)) 
-        $req->add_headers($args['headers']);
-    if (array_key_exists('content-length', $args))
-        $req->add_header('Content-Length', $args['content-length']);
-    if (array_key_exists('etag', $args)) 
-        $req->add_header('etag', $args['etag']);
-    if (array_key_exists('content-type', $args))
-        $req->add_header('Content-Type', $args['content-type']);
-    if (array_key_exists('chunk_size', $args)) 
-        $chunk_size = $args['chunk_size'];
-    else 
-        $chunk_size = 65536;
-    if (!array_key_exists('content-length', $args['headers']) and
-        !array_key_exists('content-length', $args))
-        $req->add_header('Transfer-Encoding', 'chunked');
-    $req->start_request('PUT', $url['path'] . '/' . $container . '/' . $name);
-    if (is_resource($contents))
-        while (!feof($contents)) $req->send(fread($contents, $chunk_size));
-    else $req->send($contents);
-    $resp = $req->get_response();
-    $buff = $resp->read();
-    if ($resp->get_status() < 200 or $resp->get_status() > 299)
+    private $headers;
+    private $reason;
+    private $status;
+    function __construct($headers, $status, $reason)
     {
-        throw new ClientException("ERROR Unable to PUT Object - " .
-                                  $resp->get_status(). ":" .
-                                  $resp->get_reason());
+        $this->headers = $headers;
+        $this->status = $status;
+        $this->reason = $reason;
+    }
+    public function GetHeaders()
+    {
+        return $this->headers;
+    }
+    public function GetStatus()
+    {
+        return $this->status;
+    }
+    public function GetReason()
+    {
+        return $this->reason;
     }
 }
-/**
- * DELETE an object.
- * @param string $url The Storage URL accepts proto and :port.
- * @param string $token a Valid Auth Token.
- * @param string $container Container name.
- * @param string $name Object name.
- * @param array $args Optional Configuration Options.
- * @param int $args['timeout'] Set for Socket Timeout.
- * @param http_request $args['http_conn'] Pass an http_request Object.
- * to reuse the same connection.
- * @exception ClientException.
- */
-function delete_object($url, $token, $container, $name, $args = array())
+class AccountResponse
 {
-    if (array_key_exists('timeout', $args))
-        $timeout = $args['timeout'];
-    else 
-        $timeout = 10;
-    $url = prep_url($url);
-    if (array_key_exists('http_conn', $args)) 
-        $req = $args['http_conn'];
-    else 
-        $req = new http_request($url['host'], $timeout);
-    $req->add_header('X-Auth-Token', $token);
-    $req->start_request('DELETE', $url['path'] . '/' . $container . '/' .
-                        $name);
-    $resp = $req->get_response();
-    $buff = $resp->read();
-    if ($resp->get_status() < 200 or $resp->get_status() > 299)
+    private $containers;
+    private $headers;
+    private $status;
+    private $reason;
+    function __construct($containers, $headers, $status, $reason)
     {
-        throw new ClientException("ERROR Unable to DELETE Object - " .
-                                  $resp->get_status(). ":" .
-                                  $resp->get_reason());
+        $this->containers = $containers;
+        $this->headers = $headers;
+        $this->status = $status;
+        $this->reason = $reason;
+    }
+    public function GetContainers()
+    {
+        return $this->containers;
+    }
+    public function GetHeaders()
+    {
+        return $this->headers;
+    }
+    public function GetStatus()
+    {
+        return $this->status;
+    }
+    public function GetReason()
+    {
+        return $this->reason;
+    }
+}
+class ContainerResponse
+{
+    private $objects;
+    private $headers;
+    private $status;
+    private $reason;
+    function __construct($objects, $headers, $status, $reason)
+    {
+        $this->objects = $objects;
+        $this->headers = $headers;
+        $this->status = $status;
+        $this->reason = $reason;
+    }
+    public function GetObjects()
+    {
+        return $this->objects;
+    }
+    public function GetHeaders()
+    {
+        return $this->headers;
+    }
+    public function GetStatus()
+    {
+        return $this->status;
+    }
+    public function GetReason()
+    {
+        return $this->reason;
+    }
+}
+class ObjectResponse
+{
+    private $data;
+    private $headers;
+    private $status;
+    private $reason;
+    function __construct($data, $headers, $status, $reason)
+    {
+        $this->data = $data;
+        $this->headers = $headers;
+        $this->status = $status;
+        $this->reason = $reason;
+    }
+    public function GetData($amt=null)
+    {
+        if ($amt === null)
+        {
+            return $this->data->read();
+        }
+        return $this->data->read($amt);
+    }
+    public function GetHeaders()
+    {
+        return $this->headers;
+    }
+    public function GetStatus()
+    {
+        return $this->status;
+    }
+    public function GetReason()
+    {
+        return $this->reason;
     }
 }
 ?>
