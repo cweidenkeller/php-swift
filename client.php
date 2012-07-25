@@ -35,7 +35,25 @@ class UnableToOpenFile extends Exception {}
 /**
  * @access private
  */
-class ClientException extends Exception {}
+class ClientException extends Exception
+{
+    private $_status = null;
+    private $_reason = null;
+    function __construct($message=null, $status=null, $reason=null, $code=0, Exception $previous=null)
+    {
+        $this->_status = $status;
+        $this->_reason = $reason;
+        parent::__construct($message, $code, $previous);
+    }
+    function GetStatus()
+    {
+        return $this->_status;
+    }
+    function GetReason()
+    {
+        return $this->reason;
+    }
+}
 /**
  * @access private
  */
@@ -548,6 +566,10 @@ class Client
     {
         $resp = $this->http_factory->get_http_response($url, 'GET', array('X-Auth-User' => $user, 'X-Auth-Key' => $key));
         $resp->read();
+        if ($resp->get_status() === 401)
+        {
+            throw new ClientException("Unauthorized", $resp->get_status(), $resp->get_reason());
+        }
         if ($resp->get_status() < 200 or $resp->get_status() > 299)
         {
             if ($this->_retries_attempted < $this->retries)
@@ -558,7 +580,7 @@ class Client
             $this->_retries_attempted = 0;
             throw new ClientException("ERROR Unable to GET Auth - " .
                                       $resp->get_status(). ":" .
-                                      $resp->get_reason());
+                                      $resp->get_reason(), $resp->get_status(), $resp->get_reason());
         }
         $headers = $resp->get_headers();
         if ($snet === true)
@@ -590,6 +612,10 @@ class Client
         $status = $resp->get_status();
         $reason = $resp->get_reason();
         $containers = $resp->read();
+        if ($resp->get_status() === 401)
+        {
+            throw new ClientException("Unauthorized", $resp->get_status(), $resp->get_reason());
+        }
         if ($resp->get_status() < 200 or $resp->get_status() > 299)
         {
             if ($this->_retries_attempted < $this->retries)
@@ -600,7 +626,7 @@ class Client
             $this->_retries_attempted = 0;
             throw new ClientException("ERROR Unable to GET Account - " .
                                       $resp->get_status() . ":" .
-                                      $resp->get_reason());
+                                      $resp->get_reason(), $resp->get_status(), $resp->get_reason());
         }
         $containers = json_decode($containers, true);
         if (array_key_exists('full_listing', $args) && $args['full_listing'] === true)
@@ -637,6 +663,11 @@ class Client
         $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
         $query = array_key_exists('query', $args) ? $args['query'] : array();
         $resp = $this->http_factory->get_http_response($url, 'HEAD', $headers, $query);
+        $resp->read();
+        if ($resp->get_status() === 401)
+        {
+            throw new ClientException("Unauthorized", $resp->get_status(), $resp->get_reason());
+        }
         if ($resp->get_status() < 200 or $resp->get_status() > 299)
         {
             if ($this->_retries_attempted < $this->retries)
@@ -647,7 +678,7 @@ class Client
             $this->_retries_attempted = 0;
             throw new ClientException("ERROR Unable to HEAD Account - " .
                                       $resp->get_status(). ":" .
-                                      $resp->get_reason());
+                                      $resp->get_reason(), $resp->get_status(), $resp->get_reason());
         }
         $this->_retries_attempted = 0;
         return new AccountResponse(array(), $resp->get_headers(), $resp->get_status(), $resp->get_reason());
@@ -668,6 +699,11 @@ class Client
         $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
         $query = array_key_exists('query', $args) ? $args['query'] : array();
         $resp = $this->http_factory->get_http_response($url, 'POST', $headers, $query);
+        $resp->read();
+        if ($resp->get_status() === 401)
+        {
+            throw new ClientException("Unauthorized", $resp->get_status(), $resp->get_reason());
+        }
         if ($resp->get_status() < 200 or $resp->get_status() > 299)
         {
             if ($this->_retries_attempted < $this->retries)
@@ -679,7 +715,7 @@ class Client
             $this->_retries_attempted = 0;
             throw new ClientException("ERROR Unable to POST Account - " .
                                       $resp->get_status(). ":" .
-                                      $resp->get_reason());
+                                      $resp->get_reason(), $resp->get_status(), $resp->get_reason());
         }
         $this->_retries_attempted = 0;
     }
@@ -709,6 +745,10 @@ class Client
         $status = $resp->get_status();
         $reason = $resp->get_reason();
         $objects = $resp->read();
+        if ($resp->get_status() === 401)
+        {
+            throw new ClientException("Unauthorized", $resp->get_status(), $resp->get_reason());
+        }
         if ($resp->get_status() <  200 or $resp->get_status() > 299)
         {
             if ($this->_retries_attempted < $this->retries)
@@ -719,7 +759,7 @@ class Client
             $this->_retries_attempted = 0;
             throw new ClientException("ERROR Unable to GET Container - " .
                                       $resp->get_status(). ":" .
-                                      $resp->get_reason());
+                                      $resp->get_reason(), $resp->get_status(), $resp->get_reason());
         }
         $objects = json_decode($objects, true);
         if (array_key_exists('full_listing', $args) && $args['full_listing'] === true)
@@ -755,6 +795,11 @@ class Client
         $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
         $query = array_key_exists('query', $args) ? $args['query'] : array();
         $resp = $this->http_factory->get_http_response($url . '/' . $container, 'HEAD', $headers, $query);
+        $resp->get_status();
+        if ($resp->get_status() === 401)
+        {
+            throw new ClientException("Unauthorized", $resp->get_status(), $resp->get_reason());
+        }
         if ($resp->get_status() < 200 or $resp->get_status() > 299)
         {
             if ($this->_retries_attempted < $this->retries)
@@ -765,7 +810,7 @@ class Client
             $this->_retries_attempted = 0;
             throw new ClientException("ERROR Unable to HEAD Container - " .
                                       $resp->get_status(). ":" .
-                                      $resp->get_reason());
+                                      $resp->get_reason(), $resp->get_status(), $resp->get_reason());
         }
         $this->_retries_attempted = 0;
         return new ContainerResponse(array(), $resp->get_headers(), $resp->get_status(), $resp->get_reason());
@@ -787,6 +832,11 @@ class Client
         $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
         $query = array_key_exists('query', $args) ? $args['query'] : array();
         $resp = $this->http_factory->get_http_response($url . '/' . $container, 'POST', $headers, $query);
+        $resp->read();
+        if ($resp->get_status() === 401)
+        {
+            throw new ClientException("Unauthorized", $resp->get_status(), $resp->get_reason());
+        }
         if ($resp->get_status() < 200 or $resp->get_status() > 299)
         {
             if ($this->_retries_attempted < $this->retries)
@@ -798,7 +848,7 @@ class Client
             $this->_retries_attempted = 0;
             throw new ClientException("ERROR Unable to POST Container - " .
                                       $resp->get_status(). ":" .
-                                      $resp->get_reason());
+                                      $resp->get_reason(), $resp->get_status(), $resp->get_reason());
         }
     }
     /**
@@ -818,6 +868,11 @@ class Client
         $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
         $query = array_key_exists('query', $args) ? $args['query'] : array();
         $resp = $this->http_factory->get_http_response($url . '/' . $container, 'PUT', $headers, $query);
+        $resp->read();
+        if ($resp->get_status() === 401)
+        {
+            throw new ClientException("Unauthorized", $resp->get_status(), $resp->get_reason());
+        }
         if ($resp->get_status() < 200 or $resp->get_status() > 299)
         {
             if ($this->_retries_attempted < $this->retries)
@@ -829,7 +884,7 @@ class Client
             $this->_retries_attempted = 0;
             throw new ClientException("ERROR Unable to PUT Container - " .
                                       $resp->get_status(). ":" .
-                                      $resp->get_reason());
+                                      $resp->get_reason(), $resp->get_status(), $resp->get_reason());
         }
     }
     /**
@@ -848,6 +903,11 @@ class Client
         $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
         $query = array_key_exists('query', $args) ? $args['query'] : array();
         $resp = $this->http_factory->get_http_response($url . '/' . $container, 'DELETE', $headers, $query);
+        $resp->read();
+        if ($resp->get_status() === 401)
+        {
+            throw new ClientException("Unauthorized", $resp->get_status(), $resp->get_reason());
+        }
         if ($resp->get_status() < 200 or $resp->get_status() > 299)
         {
             if ($this->_retries_attempted < $this->retries)
@@ -859,7 +919,7 @@ class Client
             $this->_retries_attempted = 0;
             throw new ClientException("ERROR Unable to DELETE Container - " .
                                       $resp->get_status(). ":" .
-                                      $resp->get_reason());
+                                      $resp->get_reason(), $resp->get_status(), $resp->get_reason());
         }
     }
     /**
@@ -882,6 +942,11 @@ class Client
         $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
         $query = array_key_exists('query', $args) ? $args['query'] : array();
         $resp = $this->http_factory->get_http_response($url . '/' . $container . '/' . $name, 'GET', $headers, $query);
+        $resp->read();
+        if ($resp->get_status() === 401)
+        {
+            throw new ClientException("Unauthorized", $resp->get_status(), $resp->get_reason());
+        }
         if ($resp->get_status() < 200 or $resp->get_status() > 299)
         {
             if ($this->_retries_attempted < $this->retries)
@@ -893,7 +958,7 @@ class Client
             $resp->read();
             throw new ClientException("ERROR Unable to GET Object - " .
                                       $resp->get_status(). ":" .
-                                      $resp->get_reason());
+                                      $resp->get_reason(), $resp->get_status(), $resp->get_reason());
         }
         return new ObjectResponse($resp, $resp->get_headers(), $resp->get_status(), $resp->get_reason());
     }
@@ -915,6 +980,11 @@ class Client
         $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
         $query = array_key_exists('query', $args) ? $args['query'] : array();
         $resp = $this->http_factory->get_http_response($url . '/' . $container . '/' . $name, 'HEAD', $headers, $query);
+        $resp->read();
+        if ($resp->get_status() === 401)
+        {
+            throw new ClientException("Unauthorized", $resp->get_status(), $resp->get_reason());
+        }
         if ($resp->get_status() < 200 or $resp->get_status() > 299)
         {
             if ($this->_retries_attempted < $this->retries)
@@ -925,7 +995,7 @@ class Client
             $this->_retries_attempted = 0;
             throw new ClientException("ERROR Unable to HEAD Object - " .
                                       $resp->get_status(). ":" .
-                                      $resp->get_reason());
+                                      $resp->get_reason(), $resp->get_status(), $resp->get_reason());
         }
         return new ObjectResponse(null, $resp->get_headers(), $resp->get_status(), $resp->get_reason());
     }
@@ -947,6 +1017,11 @@ class Client
         $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
         $query = array_key_exists('query', $args) ? $args['query'] : array();
         $resp = $this->http_factory->get_http_response($url . '/' . $container . '/' . $name, 'POST', $headers, $query);
+        $resp->read();
+        if ($resp->get_status() === 401)
+        {
+            throw new ClientException("Unauthorized", $resp->get_status(), $resp->get_reason());
+        }
         if ($resp->get_status() < 200 or $resp->get_status() > 299)
         {
             if ($this->_retries_attempted < $this->retries)
@@ -957,7 +1032,7 @@ class Client
             }
             throw new ClientException("ERROR Unable to POST Object - " .
                                        $resp->get_status(). ":" .
-                                       $resp->get_reason());
+                                       $resp->get_reason(), $resp->get_status(), $resp->get_reason());
         }
     }
     /**
@@ -986,6 +1061,11 @@ class Client
         $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
         $query = array_key_exists('query', $args) ? $args['query'] : array();
         $resp = $this->http_factory->get_http_response($url . '/' . $container . '/' . $name, 'PUT', $headers, $query, $contents);
+        $resp->read();
+        if ($resp->get_status() === 401)
+        {
+            throw new ClientException("Unauthorized", $resp->get_status(), $resp->get_reason());
+        }
         if ($resp->get_status() < 200 or $resp->get_status() > 299)
         {
             if ($this->_retries_attempted < $this->retries)
@@ -1000,7 +1080,7 @@ class Client
             }
             throw new ClientException("ERROR Unable to PUT Object - " .
                                       $resp->get_status(). ":" .
-                                      $resp->get_reason());
+                                      $resp->get_reason(), $resp->get_status(), $resp->get_reason());
         }
     }
    /**
@@ -1020,6 +1100,11 @@ class Client
         $headers = array_key_exists('headers', $args) ? array_merge($args['headers'], array('X-Auth-Token' => $token)) : array('X-Auth-Token' => $token);
         $query = array_key_exists('query', $args) ? $args['query'] : array();
         $resp = $this->http_factory->get_http_response($url . '/' . $container . '/' . $name, 'DELETE', $headers, $query);
+        $resp->read();
+        if ($resp->get_status() === 401)
+        {
+            throw new ClientException("Unauthorized", $resp->get_status(), $resp->get_reason());
+        }
         if ($resp->get_status() < 200 or $resp->get_status() > 299)
         {
             if ($this->_retries_attempted < $this->retries)
@@ -1030,7 +1115,7 @@ class Client
             }
             throw new ClientException("ERROR Unable to DELETE Object - " .
                                       $resp->get_status(). ":" .
-                                      $resp->get_reason());
+                                      $resp->get_reason(), $resp->get_status(), $resp->get_reason());
         }
     }
 }
