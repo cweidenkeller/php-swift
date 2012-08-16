@@ -51,7 +51,7 @@ class ClientException extends Exception
     }
     function GetReason()
     {
-        return $this->reason;
+        return $this->_reason;
     }
 }
 /**
@@ -160,9 +160,9 @@ class http_response
         if (array_key_exists('content-length', $this->headers))
         {
             if ($this->headers['content-length'] == 0) 
-                return null;
+                return '';
             if ($this->amt_read == $this->headers['content-length']) 
-                return null;
+                return '';
             elseif (($amt + $this->amt_read) < $this->headers['content-length']
                     and $amt) 
                 $this->amt_read += $amt;
@@ -526,6 +526,7 @@ class HTTPResponseFactory
                 {
                     $req->send(fread($contents, $chunk_size));
                 }
+                fclose($contents);
             }
             else
             {
